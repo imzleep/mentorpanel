@@ -1,65 +1,109 @@
-import Image from "next/image";
+import { createClient } from "@/utils/supabase/server";
+import { ClientDashboard } from "@/components/views/ClientDashboard";
+import { redirect } from "next/navigation";
 
-export default function Home() {
+export const runtime = 'edge';
+
+export default async function Home() {
+  const supabase = await createClient();
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    redirect("/login");
+  }
+
+  // Fetch current user's profile with metrics
+  const { data: currentProfile } = await supabase
+    .from("profiles")
+    .select(`
+      id, discord_id, in_game_name, uid, role, total_points, timezone,
+      mentor_metrics (
+        participation_points,
+        mentoring_points,
+        co_host_points,
+        abih_responses_points,
+        knowledge_points,
+        communication_points,
+        behavior_points,
+        exam_passed,
+        strikes,
+        quota
+      )
+    `)
+    .eq("id", user.id)
+    .single();
+
+  if (!currentProfile) {
+    redirect("/onboarding");
+  }
+
+  // Fetch all mentors for the roster (excluding Instructors and Leads from the public view)
+  const { data: rosterData } = await supabase
+    .from("profiles")
+    .select(`
+      id, discord_id, in_game_name, uid, role, total_points, timezone,
+      mentor_metrics (
+        participation_points,
+        mentoring_points,
+        co_host_points,
+        abih_responses_points,
+        knowledge_points,
+        communication_points,
+        behavior_points,
+        exam_passed,
+        strikes,
+        quota
+      )
+    `)
+    .in("role", ["Junior Mentor", "Mentor", "Senior Mentor"])
+    .order("total_points", { ascending: false });
+
+  // Map the nested mentor_metrics properly, just in case it returns an array due to Supabase typing quirks
+  const mappedRosterData = (rosterData || []).map((profile) => ({
+    ...profile,
+    mentor_metrics: Array.isArray(profile.mentor_metrics) ? profile.mentor_metrics[0] : profile.mentor_metrics
+  }));
+
+  const mappedCurrentProfile = {
+    ...currentProfile,
+    mentor_metrics: Array.isArray(currentProfile.mentor_metrics) ? currentProfile.mentor_metrics[0] : currentProfile.mentor_metrics
+  };
+
+  let pendingSubmissions: any[] = [];
+  let approvedMentorships: any[] = [];
+  
+  if (mappedCurrentProfile.role === "Lead") {
+    const { data: pending } = await supabase
+      .from("submissions")
+      .select(`
+        id, profile_id, category, mentee_ign, mentee_uid, guide_link, status, created_at, request_screenshot_path, match_screenshot_path,
+        profiles ( in_game_name )
+      `)
+      .eq("status", "Pending")
+      .order("created_at", { ascending: true });
+    
+    pendingSubmissions = pending || [];
+
+    const { data: approved } = await supabase
+      .from("submissions")
+      .select(`
+        id, mentee_ign, mentee_uid, category, created_at,
+        profiles ( in_game_name )
+      `)
+      .eq("status", "Approved")
+      .not("mentee_ign", "is", null)
+      .order("created_at", { ascending: false });
+    
+    approvedMentorships = approved || [];
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <ClientDashboard 
+      currentUser={mappedCurrentProfile as any} 
+      rosterData={mappedRosterData as any}
+      pendingSubmissions={pendingSubmissions}
+      approvedMentorships={approvedMentorships}
+    />
   );
 }
